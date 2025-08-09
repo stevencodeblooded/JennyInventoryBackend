@@ -1,0 +1,61 @@
+JennySaleFlow/
+├── backend/
+│   ├── src/
+│   │   ├── config/
+│   │   │   ├── database.js
+│   │   │   ├── auth.js
+│   │   │   └── app.js
+│   │   ├── models/
+│   │   │   ├── User.js
+│   │   │   ├── Product.js
+│   │   │   ├── Sale.js
+│   │   │   ├── Order.js
+│   │   │   ├── Customer.js
+│   │   │   ├── Category.js
+│   │   │   ├── ActivityLog.js
+│   │   │   └── Settings.js
+│   │   ├── controllers/
+│   │   │   ├── authController.js
+│   │   │   ├── userController.js
+│   │   │   ├── productController.js
+│   │   │   ├── saleController.js
+│   │   │   ├── orderController.js
+│   │   │   ├── customerController.js
+│   │   │   ├── reportController.js
+│   │   │   ├── activityController.js
+│   │   │   └── dashboardController.js
+│   │   ├── routes/
+│   │   │   ├── authRoutes.js
+│   │   │   ├── userRoutes.js
+│   │   │   ├── productRoutes.js
+│   │   │   ├── saleRoutes.js
+│   │   │   ├── orderRoutes.js
+│   │   │   ├── customerRoutes.js
+│   │   │   ├── reportRoutes.js
+│   │   │   └── index.js
+│   │   ├── middleware/
+│   │   │   ├── auth.js
+│   │   │   ├── validation.js
+│   │   │   ├── errorHandler.js
+│   │   │   ├── rateLimiter.js
+│   │   │   └── logger.js
+│   │   ├── utils/
+│   │   │   ├── validators.js
+│   │   │   ├── helpers.js
+│   │   │   ├── constants.js
+│   │   │   └── emailService.js
+│   │   ├── seeds/
+│   │   │   └── seedData.js
+│   │   └── server.js
+│   ├── tests/
+│   │   ├── unit/
+│   │   └── integration/
+│   ├── .env.example
+│   ├── .gitignore
+│   ├── package.json
+│   └── README.md
+├── frontend/
+│   └── (will create after backend)
+└── docs/
+    ├── API.md
+    └── DATABASE.md
