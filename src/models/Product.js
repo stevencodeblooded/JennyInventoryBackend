@@ -59,11 +59,6 @@ const productSchema = new mongoose.Schema(
       default: "piece",
     },
     pricing: {
-      cost: {
-        type: Number,
-        required: [true, "Cost price is required"],
-        min: [0, "Cost cannot be negative"],
-      },
       sellingPrice: {
         type: Number,
         required: [true, "Selling price is required"],

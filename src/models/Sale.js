@@ -1,12 +1,13 @@
 // backend/src/models/Sale.js
 const mongoose = require("mongoose");
-const Counter = require("./Counter"); // We'll create this for receipt numbers
 
 const saleSchema = new mongoose.Schema(
   {
     receiptNumber: {
       type: String,
-      required: true,
+      required: function () {
+        return !this.isNew; // Only required after creation
+      },
       unique: true,
     },
     items: [
@@ -43,10 +44,6 @@ const saleSchema = new mongoose.Schema(
           },
         },
         tax: {
-          rate: {
-            type: Number,
-            default: 16, // Kenya VAT
-          },
           amount: {
             type: Number,
             default: 0,
@@ -107,6 +104,7 @@ const saleSchema = new mongoose.Schema(
         type: Number,
         required: true,
         min: 0,
+        default: 0,
       },
       discount: {
         type: Number,
@@ -122,6 +120,7 @@ const saleSchema = new mongoose.Schema(
         type: Number,
         required: true,
         min: 0,
+        default: 0,
       },
     },
     seller: {
@@ -219,21 +218,18 @@ saleSchema.virtual("profit").get(function () {
 saleSchema.pre("save", async function (next) {
   if (this.isNew && !this.receiptNumber) {
     try {
-      const counter = await Counter.findByIdAndUpdate(
-        "receipt",
-        { $inc: { seq: 1 } },
-        { new: true, upsert: true }
-      );
+      const Counter = mongoose.model("Counter");
+      const sequence = await Counter.getNextSequence("receipt");
 
       const date = new Date();
       const year = date.getFullYear().toString().substr(-2);
       const month = (date.getMonth() + 1).toString().padStart(2, "0");
       const day = date.getDate().toString().padStart(2, "0");
-      const sequence = counter.seq.toString().padStart(5, "0");
+      const sequenceStr = sequence.toString().padStart(5, "0");
 
-      this.receiptNumber = `RCP${year}${month}${day}${sequence}`;
+      this.receiptNumber = `RCP${year}${month}${day}${sequenceStr}`;
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
   next();
@@ -241,7 +237,8 @@ saleSchema.pre("save", async function (next) {
 
 // Calculate totals before saving
 saleSchema.pre("save", function (next) {
-  if (this.isModified("items")) {
+  // Always calculate totals for new documents or when items are modified
+  if (this.isNew || this.isModified("items")) {
     let subtotal = 0;
     let totalDiscount = 0;
     let totalTax = 0;
@@ -269,6 +266,11 @@ saleSchema.pre("save", function (next) {
       totalDiscount += discount;
       totalTax += tax;
     });
+
+    // Ensure totals object exists
+    if (!this.totals) {
+      this.totals = {};
+    }
 
     this.totals.subtotal = subtotal;
     this.totals.discount = totalDiscount;

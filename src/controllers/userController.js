@@ -1,4 +1,5 @@
 // backend/src/controllers/userController.js
+const mongoose = require("mongoose");
 const User = require("../models/User");
 const ActivityLog = require("../models/ActivityLog");
 const Sale = require("../models/Sale");
@@ -112,9 +113,22 @@ const updateUser = asyncHandler(async (req, res, next) => {
     return next(new AppError("User not found", 404));
   }
 
-  // Prevent updating own role
-  if (req.user._id.toString() === user._id.toString() && req.body.role) {
+  // FIXED: Check if role is actually being changed, not just present in request
+  if (
+    req.user._id.toString() === user._id.toString() &&
+    req.body.role &&
+    req.body.role !== user.role
+  ) {
     return next(new AppError("You cannot change your own role", 400));
+  }
+
+  // FIXED: Prevent deactivating own account
+  if (
+    req.user._id.toString() === user._id.toString() &&
+    req.body.hasOwnProperty("isActive") &&
+    req.body.isActive === false
+  ) {
+    return next(new AppError("You cannot deactivate your own account", 400));
   }
 
   // Track changes for activity log
@@ -340,10 +354,33 @@ const getUserActivity = asyncHandler(async (req, res, next) => {
 // @route   GET /api/users/:id/performance
 // @access  Private (Owner/Manager or Self)
 const getUserPerformance = asyncHandler(async (req, res, next) => {
-  const {
-    startDate = new Date(new Date().setMonth(new Date().getMonth() - 1)),
-    endDate = new Date(),
-  } = req.query;
+  let { startDate, endDate, period } = req.query;
+
+  // Handle period parameter
+  if (period) {
+    endDate = new Date();
+    startDate = new Date();
+
+    switch (period) {
+      case "week":
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case "month":
+        startDate.setMonth(startDate.getMonth() - 1);
+        break;
+      case "year":
+        startDate.setFullYear(startDate.getFullYear() - 1);
+        break;
+      default:
+        startDate.setMonth(startDate.getMonth() - 1);
+    }
+  } else {
+    // Use provided dates or default to last month
+    startDate = startDate
+      ? new Date(startDate)
+      : new Date(new Date().setMonth(new Date().getMonth() - 1));
+    endDate = endDate ? new Date(endDate) : new Date();
+  }
 
   // Check access rights
   if (
@@ -358,12 +395,12 @@ const getUserPerformance = asyncHandler(async (req, res, next) => {
 
   const userId = req.params.id;
 
-  // Get sales performance
+  // Get sales performance - FIX: Add 'new' keyword
   const salesPerformance = await Sale.aggregate([
     {
       $match: {
-        seller: mongoose.Types.ObjectId(userId),
-        createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) },
+        seller: new mongoose.Types.ObjectId(userId), // FIXED
+        createdAt: { $gte: startDate, $lte: endDate },
         status: { $in: ["completed", "partial_refund"] },
       },
     },
@@ -378,12 +415,12 @@ const getUserPerformance = asyncHandler(async (req, res, next) => {
     },
   ]);
 
-  // Get daily breakdown
+  // Get daily breakdown - FIX: Add 'new' keyword
   const dailyPerformance = await Sale.aggregate([
     {
       $match: {
-        seller: mongoose.Types.ObjectId(userId),
-        createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) },
+        seller: new mongoose.Types.ObjectId(userId), // FIXED
+        createdAt: { $gte: startDate, $lte: endDate },
         status: { $in: ["completed", "partial_refund"] },
       },
     },
@@ -397,12 +434,12 @@ const getUserPerformance = asyncHandler(async (req, res, next) => {
     { $sort: { _id: 1 } },
   ]);
 
-  // Get order performance
+  // Get order performance - FIX: Add 'new' keyword
   const orderPerformance = await Order.aggregate([
     {
       $match: {
-        assignedTo: mongoose.Types.ObjectId(userId),
-        createdAt: { $gte: new Date(startDate), $lte: new Date(endDate) },
+        assignedTo: new mongoose.Types.ObjectId(userId), // FIXED
+        createdAt: { $gte: startDate, $lte: endDate },
       },
     },
     {
@@ -412,6 +449,59 @@ const getUserPerformance = asyncHandler(async (req, res, next) => {
       },
     },
   ]);
+
+  // ADD: Get user ranking based on sales performance
+  const userRanking = await Sale.aggregate([
+    {
+      $match: {
+        createdAt: { $gte: startDate, $lte: endDate },
+        status: { $in: ["completed", "partial_refund"] },
+      },
+    },
+    {
+      $group: {
+        _id: "$seller",
+        totalSales: { $sum: 1 },
+        totalRevenue: { $sum: "$totals.total" },
+      },
+    },
+    {
+      $sort: { totalRevenue: -1 }, // Sort by revenue descending
+    },
+    {
+      $group: {
+        _id: null,
+        users: {
+          $push: {
+            userId: "$_id",
+            totalSales: "$totalSales",
+            totalRevenue: "$totalRevenue",
+          },
+        },
+      },
+    },
+    {
+      $unwind: {
+        path: "$users",
+        includeArrayIndex: "rank",
+      },
+    },
+    {
+      $match: {
+        "users.userId": new mongoose.Types.ObjectId(userId),
+      },
+    },
+  ]);
+
+  // Calculate total number of active users with sales in this period
+  const totalUsersWithSales = await Sale.distinct("seller", {
+    createdAt: { $gte: startDate, $lte: endDate },
+    status: { $in: ["completed", "partial_refund"] },
+  });
+
+  const currentUserRank =
+    userRanking.length > 0 ? userRanking[0].rank + 1 : null;
+  const totalUsers = totalUsersWithSales.length;
 
   res.json({
     success: true,
@@ -425,6 +515,11 @@ const getUserPerformance = asyncHandler(async (req, res, next) => {
       },
       dailyPerformance,
       orders: orderPerformance,
+      // ADD: Include ranking information
+      ranking: {
+        rank: currentUserRank,
+        totalUsers: totalUsers,
+      },
     },
   });
 });

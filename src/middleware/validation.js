@@ -148,11 +148,6 @@ const productValidations = {
         "can",
       ])
       .withMessage("Invalid unit"),
-    body("pricing.cost")
-      .notEmpty()
-      .withMessage("Cost price is required")
-      .isFloat({ min: 0 })
-      .withMessage("Cost must be a positive number"),
     body("pricing.sellingPrice")
       .notEmpty()
       .withMessage("Selling price is required")

@@ -13,6 +13,9 @@ const {
   getSalesByProduct,
   getPendingPayments,
   recordPayment,
+  initiateMpesaPayment,
+  checkMpesaPaymentStatus,
+  mpesaCallback,
 } = require("../controllers/saleController");
 
 const {
@@ -27,6 +30,9 @@ const {
 } = require("../middleware/validation");
 
 const { transactionLimiter } = require("../middleware/rateLimiter");
+
+// M-Pesa callback route (must be BEFORE authentication)
+router.post("/mpesa/callback", mpesaCallback);
 
 // All routes require authentication
 router.use(authenticate);
@@ -108,5 +114,9 @@ router.post(
   commonValidations.mongoId("id"),
   recordPayment
 );
+
+// M-Pesa payment routes (these need authentication)
+router.post("/mpesa/initiate", initiateMpesaPayment);
+router.get("/mpesa/status/:checkoutRequestId", checkMpesaPaymentStatus);
 
 module.exports = router;

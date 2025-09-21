@@ -5,6 +5,277 @@ const Customer = require("../models/Customer");
 const ActivityLog = require("../models/ActivityLog");
 const { asyncHandler, AppError } = require("../middleware/errorHandler");
 const { activityLogger } = require("../middleware/logger");
+const mpesaService = require("../services/mpesaService");
+const MpesaTransaction = require("../models/MpesaTransaction");
+
+// @desc    Initiate M-Pesa STK Push
+// @route   POST /api/v1/sales/mpesa/initiate
+// @access  Private
+const initiateMpesaPayment = asyncHandler(async (req, res, next) => {
+  console.log('=== M-Pesa Initiation Request ===');
+  console.log('Request body:', req.body);
+  console.log('User:', req.user?.name);
+
+  const { phone, amount } = req.body;
+
+  // Validate inputs
+  if (!phone || !amount) {
+    console.error('Missing required fields:', { phone: !!phone, amount: !!amount });
+    return next(new AppError('Phone number and amount are required', 400));
+  }
+
+  if (amount < 1) {
+    return next(new AppError('Minimum amount is KSH 1', 400));
+  }
+
+  // Validate phone number format
+  const phoneRegex = /^(254|0)[17]\d{8}$/;
+  if (!phoneRegex.test(phone)) {
+    return next(new AppError('Invalid phone number format. Use format: 0712345678 or 254712345678', 400));
+  }
+
+  // Environment check
+  console.log('Environment variables check:', {
+    hasConsumerKey: !!process.env.MPESA_CONSUMER_KEY,
+    hasConsumerSecret: !!process.env.MPESA_CONSUMER_SECRET,
+    hasCallbackURL: !!process.env.MPESA_CALLBACK_URL,
+    environment: process.env.MPESA_ENVIRONMENT,
+    businessShortCode: process.env.MPESA_BUSINESS_SHORTCODE,
+  });
+
+  try {
+    // Generate unique references
+    const timestamp = Date.now();
+    const accountReference = `POS-${timestamp}`;
+    const transactionDesc = `Payment for POS Sale - ${timestamp}`;
+
+    console.log('Initiating STK Push with:', {
+      phone,
+      amount: Math.round(amount),
+      accountReference,
+      transactionDesc,
+    });
+
+    // Call M-Pesa service
+    const stkResult = await mpesaService.stkPush(
+      phone,
+      amount,
+      accountReference,
+      transactionDesc
+    );
+
+    console.log('STK Push Result:', stkResult);
+
+    // Check if STK push was successful
+    if (!stkResult.success) {
+      console.error('STK Push failed:', stkResult.error);
+      return next(
+        new AppError(
+          `Failed to initiate M-Pesa payment: ${JSON.stringify(stkResult.error)}`,
+          400
+        )
+      );
+    }
+
+    // Validate required response fields
+    if (!stkResult.checkoutRequestId || !stkResult.merchantRequestId) {
+      console.error('Missing required STK response fields:', stkResult);
+      return next(new AppError('Invalid M-Pesa response - missing request IDs', 500));
+    }
+
+    // Save transaction record to database
+    const transaction = new MpesaTransaction({
+      checkoutRequestId: stkResult.checkoutRequestId,
+      merchantRequestId: stkResult.merchantRequestId,
+      phoneNumber: phone,
+      amount: Math.round(amount),
+      accountReference,
+      transactionDesc,
+      user: req.user._id,
+      status: 'pending',
+    });
+
+    await transaction.save();
+    console.log('Transaction saved to database:', transaction._id);
+
+    // Return successful response
+    res.status(200).json({
+      success: true,
+      data: {
+        checkoutRequestId: stkResult.checkoutRequestId,
+        merchantRequestId: stkResult.merchantRequestId,
+        message: 'STK push sent successfully. Please check your phone and enter M-Pesa PIN.',
+        responseCode: stkResult.responseCode,
+        responseDescription: stkResult.responseDescription,
+      },
+    });
+
+    console.log('=== M-Pesa Initiation Successful ===');
+
+  } catch (error) {
+    console.error('=== M-Pesa Initiation Error ===');
+    console.error('Error details:', error);
+    
+    if (error.code === 11000) {
+      // Duplicate key error - probably duplicate checkoutRequestId
+      return next(new AppError('Duplicate transaction request. Please try again.', 400));
+    }
+
+    return next(new AppError('Failed to process M-Pesa payment: ' + error.message, 500));
+  }
+});
+
+// @desc    Check M-Pesa payment status
+// @route   GET /api/sales/mpesa/status/:checkoutRequestId
+// @access  Private
+const checkMpesaPaymentStatus = asyncHandler(async (req, res, next) => {
+  const { checkoutRequestId } = req.params;
+
+  const transaction = await MpesaTransaction.findOne({ checkoutRequestId });
+
+  if (!transaction) {
+    return next(new AppError('Transaction not found', 404));
+  }
+
+  // If status is already final, return cached result
+  if (transaction.status === 'success' || transaction.status === 'failed') {
+    return res.json({
+      success: true,
+      data: {
+        status: transaction.status,
+        transactionId: transaction.mpesaReceiptNumber,
+        resultDesc: transaction.resultDesc,
+      },
+    });
+  }
+
+  // Query M-Pesa for status (with rate limiting)
+  const now = new Date();
+  const lastQuery = transaction.lastQueryAt;
+  
+  if (lastQuery && (now - lastQuery) < 5000) { // 5 second rate limit
+    return res.json({
+      success: true,
+      data: {
+        status: transaction.status,
+        transactionId: transaction.mpesaReceiptNumber,
+      },
+    });
+  }
+
+  try {
+    const queryResult = await mpesaService.stkQuery(checkoutRequestId);
+    
+    if (queryResult.success) {
+      // Update transaction based on result
+      if (queryResult.resultCode === '0') {
+        transaction.status = 'success';
+        // Note: Receipt number comes from callback, not query
+      } else if (queryResult.resultCode === '1032') {
+        transaction.status = 'cancelled';
+      } else {
+        transaction.status = 'failed';
+      }
+      
+      transaction.resultCode = queryResult.resultCode;
+      transaction.resultDesc = queryResult.resultDesc;
+      transaction.lastQueryAt = now;
+      transaction.retryCount += 1;
+      
+      await transaction.save();
+    }
+
+    res.json({
+      success: true,
+      data: {
+        status: transaction.status,
+        transactionId: transaction.mpesaReceiptNumber,
+        resultDesc: transaction.resultDesc,
+      },
+    });
+  } catch (error) {
+    console.error('M-Pesa status check error:', error);
+    res.json({
+      success: true,
+      data: {
+        status: transaction.status,
+        transactionId: transaction.mpesaReceiptNumber,
+      },
+    });
+  }
+});
+
+// @desc    Handle M-Pesa callback
+// @route   POST /api/sales/mpesa/callback
+// @access  Public
+const mpesaCallback = asyncHandler(async (req, res, next) => {
+  try {
+    const { Body } = req.body;
+    const { stkCallback } = Body;
+    
+    const checkoutRequestId = stkCallback.CheckoutRequestID;
+    const resultCode = stkCallback.ResultCode;
+    const resultDesc = stkCallback.ResultDesc;
+
+    const transaction = await MpesaTransaction.findOne({ checkoutRequestId });
+    
+    if (!transaction) {
+      console.error('M-Pesa callback: Transaction not found', checkoutRequestId);
+      return res.json({ message: 'Transaction not found' });
+    }
+
+    // Update transaction
+    transaction.resultCode = resultCode.toString();
+    transaction.resultDesc = resultDesc;
+    transaction.callbackData = req.body;
+
+    if (resultCode === 0) {
+      // Success
+      transaction.status = 'success';
+      const callbackMetadata = stkCallback.CallbackMetadata;
+      
+      if (callbackMetadata && callbackMetadata.Item) {
+        const items = callbackMetadata.Item;
+        
+        // Extract receipt number and transaction date
+        const receiptItem = items.find(item => item.Name === 'MpesaReceiptNumber');
+        const dateItem = items.find(item => item.Name === 'TransactionDate');
+        
+        if (receiptItem) transaction.mpesaReceiptNumber = receiptItem.Value;
+        if (dateItem) {
+          // Convert M-Pesa date format (20231025143022) to Date
+          const dateStr = dateItem.Value.toString();
+          const year = dateStr.substring(0, 4);
+          const month = dateStr.substring(4, 6);
+          const day = dateStr.substring(6, 8);
+          const hour = dateStr.substring(8, 10);
+          const minute = dateStr.substring(10, 12);
+          const second = dateStr.substring(12, 14);
+          
+          transaction.transactionDate = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}`);
+        }
+      }
+    } else {
+      // Failed
+      transaction.status = 'failed';
+    }
+
+    await transaction.save();
+
+    // Log for monitoring
+    console.log('M-Pesa callback processed:', {
+      checkoutRequestId,
+      resultCode,
+      status: transaction.status,
+      receiptNumber: transaction.mpesaReceiptNumber
+    });
+
+    res.json({ message: 'Callback processed successfully' });
+  } catch (error) {
+    console.error('M-Pesa callback error:', error);
+    res.status(500).json({ message: 'Callback processing failed' });
+  }
+});
 
 // @desc    Create a new sale
 // @route   POST /api/sales
@@ -42,6 +313,23 @@ const createSale = asyncHandler(async (req, res, next) => {
     // Add product name and current price to item
     item.productName = product.name;
     item.unitPrice = item.unitPrice || product.effectivePrice;
+  }
+
+  // Add this check before creating the sale
+  if (payment.method === "mpesa" && payment.details?.[0]?.transactionId) {
+    // Verify M-Pesa transaction exists and is successful
+    const mpesaTransaction = await MpesaTransaction.findOne({
+      mpesaReceiptNumber: payment.details[0].transactionId,
+      status: "success",
+    });
+
+    if (!mpesaTransaction) {
+      return next(new AppError("Invalid M-Pesa transaction", 400));
+    }
+
+    // Link sale to M-Pesa transaction
+    mpesaTransaction.sale = sale._id;
+    await mpesaTransaction.save();
   }
 
   // Create sale
@@ -760,4 +1048,7 @@ module.exports = {
   getSalesByProduct,
   getPendingPayments,
   recordPayment,
+  initiateMpesaPayment,
+  checkMpesaPaymentStatus,
+  mpesaCallback,
 };
