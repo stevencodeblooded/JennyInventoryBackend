@@ -20,6 +20,7 @@ const handleValidationErrors = (req, res, next) => {
   next();
 };
 
+
 // User validations
 const userValidations = {
   register: [
