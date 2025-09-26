@@ -80,6 +80,7 @@ const basicLimiter = rateLimit({
 });
 app.use("/api/", basicLimiter);
 
+
 // Database connection (simplified for serverless)
 let isConnected = false;
 const connectDB = async () => {
